@@ -1,0 +1,6 @@
+.venv/*
+logs/error.log
+*.pyc
+*.out
+conf/env.yaml
+instance/ai-portal.sqlite3
