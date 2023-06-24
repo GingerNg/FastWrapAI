@@ -3,12 +3,18 @@ import openai
 from .env_utils import EnvContext, EnvKeys
 
 # openai.api_base = EnvContext.get(EnvKeys.OpenAIApiBase)
-openai.api_key = EnvContext.get(EnvKeys.OpenAIApikey)
+openai.api_key = EnvContext.get(EnvKeys.OpenAIApikey.value)
 
 from utils.logger_utils import get_logger
 logger = get_logger()
 
 class Openai(object):
+
+    @staticmethod
+    def embedding(params):
+        logger.debug(params)
+        response = openai.Embedding.create(**params)
+        return response
 
     @staticmethod
     def complete(params, stream=True):
@@ -22,14 +28,11 @@ class Openai(object):
             "temperature": 0.8
         }
         kwargs.update(params)
-        print(f"kwargs:{kwargs}")
+        logger.debug(f"kwargs:{kwargs}")
         try:
             response = openai.Completion.create(**kwargs)
-            print(response)
-            if stream:
-                return response
-            else:
-                return response
+            logger.debug(response)
+            return response
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise Exception(f"OpenAI API error: {e}")
@@ -49,13 +52,11 @@ class Openai(object):
             "temperature": 0.8
         }
         kwargs.update(params)
-        print(f"kwargs:{kwargs}")
+        logger.debug(f"kwargs:{kwargs}")
         try:
             response = openai.ChatCompletion.create(**kwargs)
-            if stream:
-                return response
-            else:
-                return response["choices"][0]["message"]
+            logger.debug(response)
+            return response
         except Exception as e:
             logger.error(f"OpenAI API error: {e}")
             raise Exception(f"OpenAI API error: {e}")

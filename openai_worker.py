@@ -3,109 +3,122 @@ from fastapi import FastAPI, HTTPException, Request, status, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import json
+from typing import List, Optional, Dict
+from dataclasses import asdict, dataclass
+from typing import List
 
 from sse_starlette.sse import EventSourceResponse
 from utils.env_utils import EnvKeys, EnvContext, app
-
-import json
-from typing import List, Optional, Dict
-
-from dataclasses import dataclass
-from typing import List
 from utils.openai_utils import Openai, num_tokens_from_messages
-model_semaphore = None
-import asyncio
-def release_model_semaphore():
-    model_semaphore.release()
-
-
-def acquire_model_semaphore():
-    global model_semaphore
-    if model_semaphore is None:
-        model_semaphore = asyncio.Semaphore(2)
-    return model_semaphore.acquire()
-
-def create_background_tasks():
-    background_tasks = BackgroundTasks()
-    background_tasks.add_task(release_model_semaphore)
-    return background_tasks
-
-def generate_stream_response_start():
-    return {
-        "id": "chatcmpl-77QWpn5cxFi9sVMw56DZReDiGKmcB",
-        "object": "chat.completion.chunk", "created": 1682004627,
-        "model": "gpt-3.5-turbo-0301",
-        "choices": [{"delta": {"role": "assistant"}, "index": 0, "finish_reason": None}]
-    }
+from utils.logger_utils import get_logger
+from common.protocol.worker_api_protocol import WorkerGeneratorPath, CommonVo, EmbeddingRet, CompletionRet, StreamCompletionRet, UsageInfo
+from common.protocol.openai_api_protocol import OpenaiGeneratorPath
+from common.protocol.worker_api_protocol import release_model_semaphore, acquire_model_semaphore, create_background_tasks
+from common.protocol.worker_api_protocol import usage, svc_rd
+import sys
+logger = get_logger()
 
 openai_obj = Openai()
 
 def eval_llm(params):
-    if params.get("path", None) is None:
-        return openai_obj.chat_complete(params, stream=False)
-    else:
-        del params["path"]
-        return openai_obj.complete(params, stream=False)
+    try:
+        path = params.get("path", None)
+        if path is not None:
+                del params["path"]
+        if path is None or path == "/v1/chat/completions":
+            resp =  openai_obj.chat_complete(params, stream=False)
+            return CompletionRet(data=resp["choices"],
+                                usage_info=UsageInfo(**resp["usage"]),
+                                code=1)
+        elif path == OpenaiGeneratorPath.TEXT_COMPLETION.value:
+            resp =  openai_obj.complete(params, stream=False)
+            return CompletionRet(data=resp["choices"],
+                                usage_info=UsageInfo(**resp["usage"]),
+                                code=1)
+        elif path == OpenaiGeneratorPath.TEXT_EMBEDDING.value:
+            resp = openai_obj.embedding(params)
+            return EmbeddingRet(data=resp["data"],
+                                usage_info=UsageInfo(**resp["usage"]),
+                                code=1)
+        else:
+            raise HTTPException(status_code=500, detail="path not supported")
+    except Exception as e:
+        logger.error(e)
+        raise HTTPException(status_code=500, detail=e.__repr__())
 
-import time
 def eval_llm_stream(params: Dict):
     """
+    stream
     """
-    # tokens = []
-    # time.sleep(20)
-    if params.get("path", None) is None:
-        first = True
-        ensure_ascii = False
-        for response in openai_obj.chat_complete(params):
-            # one = response.choices[0].delta.content if 'content' in response.choices[0].delta else ''
-            # if first:
-            #     first = False
-            #     yield json.dumps(generate_stream_response_start(),
-            #                     ensure_ascii=ensure_ascii)
-            # tokens.append(one)
-            yield json.dumps(response, ensure_ascii=ensure_ascii)
-        # yield json.dumps(generate_stream_response_stop(), ensure_ascii=ensure_ascii)
+    ensure_ascii = False
+    try:
+        path = params.get("path", None)
+        if path is not None:
+                del params["path"]
+        if path is None or path == OpenaiGeneratorPath.TEXT_CHAT_COMPLETION.value:
+            for response in openai_obj.chat_complete(params):
+                logger.debug(response)
+                ret = StreamCompletionRet(data=response["choices"], code=1)
+                yield json.dumps(ret.dict(), ensure_ascii=ensure_ascii)
+                # yield json.dumps(response, ensure_ascii=ensure_ascii)
+        elif path == OpenaiGeneratorPath.TEXT_COMPLETION.value:
+            for response in openai_obj.complete(params):
+                ret = StreamCompletionRet(data=response["choices"], code=1)
+                yield json.dumps(ret.dict(), ensure_ascii=ensure_ascii)
+                # yield json.dumps(response, ensure_ascii=ensure_ascii)
+        else:
+            raise HTTPException(status_code=500, detail="path not supported")
+    except Exception as e:
+        logger.error(e)
+        raise HTTPException(status_code=500, detail=e.__repr__())
 
-        # token counter
-        # messages.append({"role": "system", "content": "".join(tokens)})
-        # num_tokens = num_tokens_from_messages(messages=messages, model=model)
-        # await sender.send(str(num_tokens))
-        # yield '[DONE]'
-    else:
-        ensure_ascii = False
-        for response in openai_obj.complete(params):
-            yield json.dumps(response, ensure_ascii=ensure_ascii)
 
-@app.post("/worker_generate_completion")
-async def api_generate_completion(request: Request):
-    params = await request.json()
-    await acquire_model_semaphore()
-    completion = eval_llm(params)
-    background_tasks = create_background_tasks()
-    return JSONResponse(content=completion, background=background_tasks)
-
-@app.post("/worker_generate_completion_stream")
+@app.post(WorkerGeneratorPath.TEXT_COMPLETION_STREAM.value)
 async def api_generate_completion_stream(request: Request):
-    params = await request.json()
-    await acquire_model_semaphore()
-    generator = eval_llm_stream(params)
-    background_tasks = create_background_tasks()
-    return StreamingResponse(generator, background=background_tasks)
+    try:
+        params = await request.json()
+        await acquire_model_semaphore()
+        generator = eval_llm_stream(params)
+        background_tasks = create_background_tasks()
+        return StreamingResponse(generator, background=background_tasks)
+    except Exception as e:
+        logger.error(e)
+        release_model_semaphore()
+        raise HTTPException(status_code=500, detail=e.__repr__())
 
-from common.svc_rgst_dscvy import SvcRgstDscvy
-import sys
-def usage():
-    """
-    print usage message and exit.
-    """
-    print('Usage: {} svc-host svc-port svc-name(optional)'.format(sys.argv[0]))
-    sys.exit(1)
+@app.post(WorkerGeneratorPath.TEXT_COMPLETION.value)
+async def api_generate_completion(request: Request):
+    try:
+        params = await request.json()
+        await acquire_model_semaphore()
+        completion = eval_llm(params)
+        background_tasks = create_background_tasks()
+        return JSONResponse(content=completion.dict(), background=background_tasks)
+    except Exception as e:
+        logger.error(e)
+        release_model_semaphore()
+        raise HTTPException(status_code=500, detail=e.__repr__())
+
+@app.post(WorkerGeneratorPath.TEXT_EMBEDDING.value)
+async def api_generate_embedding(request: Request):
+    try:
+        params = await request.json()
+        await acquire_model_semaphore()
+        resp = eval_llm(params)
+        background_tasks = create_background_tasks()
+        return JSONResponse(content=resp.dict(), background=background_tasks)
+    except Exception as e:
+        logger.error(e.__repr__())
+        release_model_semaphore()
+        raise HTTPException(status_code=500, detail=e.__repr__())
+
+
 if __name__ == '__main__':
     if len(sys.argv) < 3:
         usage()
     svc_port = int(sys.argv[2])
     host=sys.argv[1]
-    svc_rd = SvcRgstDscvy()
     if len(sys.argv) == 4:
         name = sys.argv[3]
     else:

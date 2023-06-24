@@ -1,0 +1,5 @@
+{
+"openai-worker": ["gpt-3.5-turbo", "gpt-3.5-turbo-0613", "gpt-3.5-turbo-0301",
+                "text-davinci-003", "text-embedding-ada-002"],
+"GanymedeNil/text2vec-large-chinese" : ["GanymedeNil/text2vec-large-chinese"]
+}
